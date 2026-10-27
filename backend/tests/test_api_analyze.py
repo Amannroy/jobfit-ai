@@ -4,12 +4,19 @@ from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.limiter import limiter
 from app.schemas import AnalysisResponse, MatchedSkill, MissingSkill, TailoringSuggestion, InterviewQuestion
 from app.services.analyzer_service import GeminiServiceError, GeminiConfigError
 from app.services.pdf_service import MAX_FILE_SIZE_BYTES
 from tests.test_pdf_service import _build_pdf_bytes, _build_blank_pdf_bytes
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """Ensure each test runs with a fresh rate-limiting counter."""
+    limiter.reset()
 
 VALID_JOB_DESCRIPTION = (
     "We are seeking an experienced Full Stack Software Engineer to build and scale web applications. "
@@ -174,3 +181,32 @@ def test_analyze_gemini_service_failure(mock_analyze):
     # Verify no raw secrets or keys are leaked
     assert "AIza" not in data["detail"]
     assert "key=" not in data["detail"]
+
+
+@patch("app.api.routes.analyze_job_fit")
+def test_rate_limiting_enforced(mock_analyze):
+    """7. Test that exceeding 5 requests per minute returns HTTP 429."""
+    limiter.reset()
+    mock_analyze.return_value = MOCK_ANALYSIS_RESPONSE
+    valid_pdf = _build_pdf_bytes(SAMPLE_RESUME_TEXT)
+
+    # First 5 requests must pass
+    for _ in range(5):
+        resp = client.post(
+            "/api/analyze",
+            data={"job_description": VALID_JOB_DESCRIPTION},
+            files={"resume": ("resume.pdf", valid_pdf, "application/pdf")},
+        )
+        assert resp.status_code == 200
+
+    # 6th request within the same minute window must be rate-limited
+    resp_blocked = client.post(
+        "/api/analyze",
+        data={"job_description": VALID_JOB_DESCRIPTION},
+        files={"resume": ("resume.pdf", valid_pdf, "application/pdf")},
+    )
+
+    assert resp_blocked.status_code == 429
+    data = resp_blocked.json()
+    assert "Rate limit exceeded" in data["detail"]
+    assert "5 requests per minute" in data["detail"]

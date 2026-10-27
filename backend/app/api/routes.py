@@ -1,8 +1,9 @@
 import logging
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from app.config import settings
 from app.schemas import AnalysisResponse
+from app.limiter import limiter
 from app.services.pdf_service import extract_text_from_pdf, PDFValidationError
 from app.services.analyzer_service import (
     analyze_job_fit,
@@ -30,7 +31,9 @@ async def health_check():
 
 
 @router.post("/api/analyze", response_model=AnalysisResponse, tags=["Analysis"])
+@limiter.limit("5/minute")
 async def analyze_resume_endpoint(
+    request: Request,
     resume: UploadFile = File(..., description="PDF resume file (max 5 MB)"),
     job_description: str = Form(..., description="Target job description text (min 50 chars)"),
 ):
